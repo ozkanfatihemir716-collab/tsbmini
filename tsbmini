@@ -1,0 +1,751 @@
+-- NOVE v8 | TSB Edition | Final
+if not game:IsLoaded() then game.Loaded:Wait() end
+task.wait(0.3)
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    LocalPlayer = Players.LocalPlayer
+end
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+
+-- ==================== GUI PARENT ====================
+local guiParent = PlayerGui
+pcall(function()
+    local h = gethui()
+    if h then guiParent = h end
+end)
+pcall(function()
+    for _, v in ipairs(guiParent:GetChildren()) do
+        if v.Name == "NOVE" then v:Destroy() end
+    end
+end)
+
+-- ==================== SETTINGS ====================
+local Settings = {
+    WalkSpeed = 33,
+    BackStepDist = 1,
+    BackStepRange = 4,
+    BackStepCooldown = 2.5,
+    IdleThreshold = 5,
+    PerfFpsThreshold = 10,
+    PerfFpsRecover = 25,
+    Accent = Color3.fromRGB(56, 189, 248),
+    Bg = Color3.fromRGB(15, 23, 42),
+    Card = Color3.fromRGB(30, 41, 59),
+    Border = Color3.fromRGB(51, 65, 85),
+    Text = Color3.fromRGB(241, 245, 249),
+    Muted = Color3.fromRGB(148, 163, 184),
+    Green = Color3.fromRGB(34, 197, 94),
+    Amber = Color3.fromRGB(251, 191, 36),
+}
+
+local G = {
+    WalkSpeed = true,
+    NoRagdoll = true,
+    AutoBackStep = true,
+    PerfBoost = true,
+}
+
+-- ==================== IDLE ====================
+local Idle = { active = false, timer = 0, savedStates = {} }
+
+-- ==================== PERF STATE ====================
+local PerfState = { active = false, savedQuality = nil, savedShadows = nil }
+
+-- ==================== HELPERS ====================
+local function getChar() return LocalPlayer.Character end
+local function getHRP()
+    local c = getChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHum()
+    local c = getChar()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function onClick(btn, fn)
+    local last = 0
+    local function fire()
+        if tick() - last < 0.2 then return end
+        last = tick()
+        pcall(fn)
+    end
+    pcall(function() btn.Activated:Connect(fire) end)
+    pcall(function() btn.MouseButton1Click:Connect(fire) end)
+end
+
+-- ==================== YUMUŞAK PERFORMANS BOOST ====================
+-- Sadece FPS < 10 olunca devreye girer, haritayı bozmaz
+local function enablePerfBoost()
+    if PerfState.active then return end
+    PerfState.active = true
+    PerfState.savedQuality = settings().Rendering.QualityLevel
+    PerfState.savedShadows = Lighting.GlobalShadows
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.ShadowSoftness = 0
+        Lighting.EnvironmentDiffuseScale = 0.1
+        Lighting.EnvironmentSpecularScale = 0.1
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("PostEffect") and obj.Enabled then
+                obj.Enabled = false
+                obj:SetAttribute("NOVE_disabled", true)
+            end
+        end
+        local t = workspace:FindFirstChildOfClass("Terrain")
+        if t then
+            t.WaterWaveSize = 0
+            t.WaterWaveSpeed = 0
+            t.WaterReflectance = 0
+        end
+    end)
+end
+
+local function disablePerfBoost()
+    if not PerfState.active then return end
+    PerfState.active = false
+    pcall(function()
+        if PerfState.savedQuality then
+            settings().Rendering.QualityLevel = PerfState.savedQuality
+        end
+    end)
+    pcall(function()
+        if PerfState.savedShadows ~= nil then
+            Lighting.GlobalShadows = PerfState.savedShadows
+        end
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("PostEffect") and obj:GetAttribute("NOVE_disabled") then
+                obj.Enabled = true
+                obj:SetAttribute("NOVE_disabled", nil)
+            end
+        end
+    end)
+end
+
+-- FPS'e göre otomatik tetikleme
+local function updatePerfBoost(currentFps)
+    if not G.PerfBoost then
+        if PerfState.active then disablePerfBoost() end
+        return
+    end
+    if PerfState.active then
+        -- FPS 25'in üzerine çıkarsa kapat
+        if currentFps >= Settings.PerfFpsRecover then
+            disablePerfBoost()
+        end
+    else
+        -- FPS 10'un altına düşerse aç
+        if currentFps > 0 and currentFps < Settings.PerfFpsThreshold then
+            enablePerfBoost()
+        end
+    end
+end
+
+-- ==================== IDLE AI ====================
+local function isPlayerMoving()
+    local hrp = getHRP()
+    local hum = getHum()
+    if hrp and hrp.AssemblyLinearVelocity.Magnitude > 1 then return true end
+    if hum and hum.MoveDirection.Magnitude > 0.1 then return true end
+    for _, k in ipairs({Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space}) do
+        if UserInputService:IsKeyDown(k) then return true end
+    end
+    return false
+end
+
+local function suspendAll()
+    if Idle.active then return end
+    Idle.active = true
+    Idle.savedStates = {}
+    for k, v in pairs(G) do
+        Idle.savedStates[k] = v
+        G[k] = false
+    end
+    local hum = getHum()
+    if hum then
+        pcall(function() hum.WalkSpeed = 16 end)
+        pcall(function()
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+        end)
+    end
+end
+
+local function resumeAll()
+    if not Idle.active then return end
+    Idle.active = false
+    for k, v in pairs(Idle.savedStates) do G[k] = v end
+    Idle.savedStates = {}
+    local hum = getHum()
+    if hum and G.WalkSpeed then
+        pcall(function() hum.WalkSpeed = Settings.WalkSpeed end)
+    end
+end
+
+local function updateIdle(dt)
+    if isPlayerMoving() then
+        Idle.timer = 0
+        if Idle.active then resumeAll() end
+    else
+        Idle.timer = Idle.timer + dt
+        if Idle.timer >= Settings.IdleThreshold and not Idle.active then
+            suspendAll()
+        end
+    end
+end
+
+-- ==================== WALKSPEED ====================
+local function enforceWalkSpeed()
+    if Idle.active then return end
+    if not G.WalkSpeed then return end
+    local hum = getHum()
+    if hum and math.abs(hum.WalkSpeed - Settings.WalkSpeed) > 0.1 then
+        pcall(function() hum.WalkSpeed = Settings.WalkSpeed end)
+    end
+end
+
+-- ==================== NO RAGDOLL ====================
+local function tryNoRagdoll()
+    if Idle.active then return end
+    if not G.NoRagdoll then return end
+    local hum = getHum()
+    if not hum then return end
+    pcall(function()
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        if hum.PlatformStand then hum.PlatformStand = false end
+    end)
+end
+
+-- ==================== AUTO BACK STEP ====================
+local function getClosestEnemy(maxDist)
+    local myHRP = getHRP()
+    if not myHRP then return nil end
+    local closest, minD = nil, maxDist
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local hum = p.Character:FindFirstChildOfClass("Humanoid")
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and hrp then
+                local d = (myHRP.Position - hrp.Position).Magnitude
+                if d < minD then minD = d; closest = p end
+            end
+        end
+    end
+    return closest
+end
+
+local backStepCooldownUntil = 0
+local function tryAutoBackStep()
+    if Idle.active then return end
+    if not G.AutoBackStep then return end
+    if tick() < backStepCooldownUntil then return end
+    local myHRP = getHRP()
+    if not myHRP then return end
+    local enemy = getClosestEnemy(Settings.BackStepRange)
+    if not enemy or not enemy.Character then return end
+    local tHRP = enemy.Character:FindFirstChild("HumanoidRootPart")
+    if not tHRP then return end
+    local look = tHRP.CFrame.LookVector
+    local backDir = -Vector3.new(look.X, 0, look.Z)
+    if backDir.Magnitude < 0.01 then return end
+    backDir = backDir.Unit
+    local dist = math.max(Settings.BackStepDist, 1)
+    local targetPos = tHRP.Position + backDir * dist
+    targetPos = Vector3.new(targetPos.X, myHRP.Position.Y, targetPos.Z)
+    pcall(function()
+        myHRP.CFrame = CFrame.lookAt(targetPos, tHRP.Position)
+    end)
+    backStepCooldownUntil = tick() + Settings.BackStepCooldown
+end
+
+-- ==================== UI ====================
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "NOVE"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.DisplayOrder = 999
+Gui.IgnoreGuiInset = false
+
+local parentOk = pcall(function() Gui.Parent = guiParent end)
+if not parentOk or not Gui.Parent then
+    pcall(function() Gui.Parent = PlayerGui end)
+end
+if not Gui.Parent then return end
+
+-- ANA PENCERE
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 360, 0, 480)
+Main.Position = UDim2.new(0.5, -180, 0.5, -240)
+Main.BackgroundColor3 = Settings.Bg
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Parent = Gui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+local mainStroke = Instance.new("UIStroke", Main)
+mainStroke.Color = Settings.Border
+mainStroke.Thickness = 1
+
+local uiScale = Instance.new("UIScale", Main)
+local function autoScale()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local vp = cam.ViewportSize
+    if not vp then return end
+    local s = 1
+    if vp.X < 800 then s = math.max(0.6, vp.X / 800) end
+    if vp.Y < 600 then s = math.min(s, math.max(0.6, vp.Y / 600)) end
+    uiScale.Scale = s
+end
+pcall(autoScale)
+task.spawn(function()
+    local cam = workspace.CurrentCamera
+    if not cam then
+        local ok, c = pcall(function() return workspace:WaitForChild("Camera", 5) end)
+        if ok and c then cam = c end
+    end
+    if cam then
+        pcall(function()
+            cam:GetPropertyChangedSignal("ViewportSize"):Connect(autoScale)
+        end)
+    end
+end)
+
+-- ==================== HEADER ====================
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 52)
+Header.BackgroundTransparency = 1
+Header.Active = true
+Header.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(0, 100, 0, 20)
+Title.Position = UDim2.new(0, 18, 0, 16)
+Title.BackgroundTransparency = 1
+Title.Text = "NOVE"
+Title.TextColor3 = Settings.Text
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 16
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Active = false
+Title.Parent = Header
+
+local statusDot = Instance.new("Frame")
+statusDot.Size = UDim2.new(0, 6, 0, 6)
+statusDot.Position = UDim2.new(0, 62, 0, 23)
+statusDot.BackgroundColor3 = Settings.Green
+statusDot.BorderSizePixel = 0
+statusDot.Active = false
+statusDot.Parent = Header
+Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(0, 80, 0, 20)
+statusLabel.Position = UDim2.new(0, 74, 0, 16)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "ACTIVE"
+statusLabel.TextColor3 = Settings.Green
+statusLabel.Font = Enum.Font.GothamBold
+statusLabel.TextSize = 10
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Active = false
+statusLabel.Parent = Header
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -40, 0, 12)
+CloseBtn.BackgroundColor3 = Settings.Card
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Settings.Muted
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 16
+CloseBtn.AutoButtonColor = false
+CloseBtn.Active = true
+CloseBtn.Selectable = true
+CloseBtn.Parent = Header
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+
+local Divider = Instance.new("Frame")
+Divider.Size = UDim2.new(1, -36, 0, 1)
+Divider.Position = UDim2.new(0, 18, 0, 52)
+Divider.BackgroundColor3 = Settings.Border
+Divider.BorderSizePixel = 0
+Divider.Active = false
+Divider.Parent = Main
+
+-- ==================== SCROLL ====================
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, -36, 1, -74)
+Scroll.Position = UDim2.new(0, 18, 0, 62)
+Scroll.BackgroundTransparency = 1
+Scroll.BorderSizePixel = 0
+Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarImageColor3 = Settings.Border
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+Scroll.Active = true
+Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+Scroll.Parent = Main
+
+local scrollLayout = Instance.new("UIListLayout", Scroll)
+scrollLayout.Padding = UDim.new(0, 6)
+scrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Canvas'ı manuel hesapla
+scrollLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, scrollLayout.AbsoluteContentSize.Y + 10)
+end)
+
+-- ==================== FLOAT ====================
+local FloatBtn = Instance.new("TextButton")
+FloatBtn.Size = UDim2.new(0, 50, 0, 50)
+FloatBtn.Position = UDim2.new(0, 20, 0.5, -25)
+FloatBtn.BackgroundColor3 = Settings.Bg
+FloatBtn.Text = "N"
+FloatBtn.TextColor3 = Settings.Accent
+FloatBtn.Font = Enum.Font.GothamBlack
+FloatBtn.TextSize = 22
+FloatBtn.Visible = false
+FloatBtn.AutoButtonColor = false
+FloatBtn.Active = true
+FloatBtn.Selectable = true
+FloatBtn.Parent = Gui
+Instance.new("UICorner", FloatBtn).CornerRadius = UDim.new(1, 0)
+local fbStroke = Instance.new("UIStroke", FloatBtn)
+fbStroke.Color = Settings.Border
+fbStroke.Thickness = 1
+
+local fbDragging, fbDragStart, fbStartPos, fbWasDragged = false, nil, nil, false
+FloatBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        fbDragging = true
+        fbWasDragged = false
+        fbDragStart = input.Position
+        fbStartPos = FloatBtn.Position
+        local conn
+        conn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                fbDragging = false
+                if conn then conn:Disconnect() end
+            end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not fbDragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        local d = input.Position - fbDragStart
+        if math.abs(d.X) > 5 or math.abs(d.Y) > 5 then fbWasDragged = true end
+        FloatBtn.Position = UDim2.new(fbStartPos.X.Scale, fbStartPos.X.Offset + d.X, fbStartPos.Y.Scale, fbStartPos.Y.Offset + d.Y)
+    end
+end)
+onClick(FloatBtn, function()
+    if fbWasDragged then return end
+    Main.Visible = true
+    FloatBtn.Visible = false
+end)
+onClick(CloseBtn, function()
+    Main.Visible = false
+    FloatBtn.Visible = true
+end)
+
+-- ==================== DRAG ====================
+local dragging, dragStart, startPos
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+        local conn
+        conn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                if conn then conn:Disconnect() end
+            end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        local d = input.Position - dragStart
+        local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600)
+        local nx = math.clamp(startPos.X.Offset + d.X, -Main.AbsoluteSize.X + 80, vp.X - 80)
+        local ny = math.clamp(startPos.Y.Offset + d.Y, 0, vp.Y - 40)
+        Main.Position = UDim2.new(startPos.X.Scale, nx, startPos.Y.Scale, ny)
+    end
+end)
+
+-- ==================== SECTION ====================
+local function sectionHeader(text)
+    local wrap = Instance.new("Frame")
+    wrap.Size = UDim2.new(1, 0, 0, 22)
+    wrap.BackgroundTransparency = 1
+    wrap.Active = false
+    wrap.Parent = Scroll
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 0, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Settings.Muted
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 10
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Active = false
+    lbl.Parent = wrap
+end
+
+-- ==================== TOGGLE ====================
+local function createToggle(label, defaultState, callback)
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 42)
+    row.BackgroundColor3 = Settings.Card
+    row.AutoButtonColor = false
+    row.Text = ""
+    row.Active = true
+    row.Selectable = true
+    row.Parent = Scroll
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -60, 1, 0)
+    lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.TextColor3 = Settings.Text
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Active = false
+    lbl.Parent = row
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0, 36, 0, 20)
+    track.Position = UDim2.new(1, -50, 0.5, -10)
+    track.BackgroundColor3 = Settings.Border
+    track.Active = false
+    track.Parent = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = UDim2.new(0, 2, 0.5, -8)
+    knob.BackgroundColor3 = Settings.Muted
+    knob.Active = false
+    knob.Parent = track
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local state = defaultState
+    local function update(animate)
+        local info = animate and TweenInfo.new(0.15, Enum.EasingStyle.Quad) or TweenInfo.new(0)
+        if state then
+            TweenService:Create(track, info, {BackgroundColor3 = Settings.Accent}):Play()
+            TweenService:Create(knob, info, {
+                Position = UDim2.new(1, -18, 0.5, -8),
+                BackgroundColor3 = Settings.Text
+            }):Play()
+        else
+            TweenService:Create(track, info, {BackgroundColor3 = Settings.Border}):Play()
+            TweenService:Create(knob, info, {
+                Position = UDim2.new(0, 2, 0.5, -8),
+                BackgroundColor3 = Settings.Muted
+            }):Play()
+        end
+    end
+    onClick(row, function()
+        state = not state
+        update(true)
+        if callback then pcall(callback, state) end
+    end)
+    update(false)
+end
+
+-- ==================== SLIDER ====================
+local function createSlider(label, minV, maxV, default, callback, suffix)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 58)
+    row.BackgroundColor3 = Settings.Card
+    row.Active = false
+    row.Parent = Scroll
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -70, 0, 20)
+    lbl.Position = UDim2.new(0, 14, 0, 8)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.TextColor3 = Settings.Text
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Active = false
+    lbl.Parent = row
+
+    local valueLbl = Instance.new("TextLabel")
+    valueLbl.Size = UDim2.new(0, 60, 0, 20)
+    valueLbl.Position = UDim2.new(1, -74, 0, 8)
+    valueLbl.BackgroundTransparency = 1
+    valueLbl.Text = tostring(default) .. (suffix or "")
+    valueLbl.TextColor3 = Settings.Accent
+    valueLbl.Font = Enum.Font.GothamBold
+    valueLbl.TextSize = 12
+    valueLbl.TextXAlignment = Enum.TextXAlignment.Right
+    valueLbl.Active = false
+    valueLbl.Parent = row
+
+    local track = Instance.new("TextButton")
+    track.Size = UDim2.new(1, -28, 0, 8)
+    track.Position = UDim2.new(0, 14, 0, 36)
+    track.BackgroundColor3 = Settings.Border
+    track.AutoButtonColor = false
+    track.Text = ""
+    track.Active = true
+    track.Selectable = true
+    track.Parent = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new((default - minV) / (maxV - minV), 0, 1, 0)
+    fill.BackgroundColor3 = Settings.Accent
+    fill.BorderSizePixel = 0
+    fill.Active = false
+    fill.Parent = track
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local handle = Instance.new("Frame")
+    handle.Size = UDim2.new(0, 16, 0, 16)
+    handle.Position = UDim2.new(1, -8, 0.5, -8)
+    handle.BackgroundColor3 = Settings.Text
+    handle.ZIndex = 5
+    handle.Active = false
+    handle.Parent = fill
+    Instance.new("UICorner", handle).CornerRadius = UDim.new(1, 0)
+
+    local function setV(v)
+        v = math.clamp(v, minV, maxV)
+        fill.Size = UDim2.new((v - minV) / (maxV - minV), 0, 1, 0)
+        valueLbl.Text = tostring(math.floor(v * 10) / 10) .. (suffix or "")
+        if callback then pcall(callback, v) end
+    end
+
+    local sliderDragging = false
+    local function updateFromInput(input)
+        local ap = track.AbsolutePosition
+        local as = track.AbsoluteSize
+        if as.X <= 0 then return end
+        local x = input.Position.X - ap.X
+        setV(minV + (maxV - minV) * math.clamp(x / as.X, 0, 1))
+    end
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            sliderDragging = true
+            updateFromInput(input)
+            local conn
+            conn = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    sliderDragging = false
+                    if conn then conn:Disconnect() end
+                end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not sliderDragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            updateFromInput(input)
+        end
+    end)
+end
+
+-- ==================== MENÜLER ====================
+sectionHeader("AUTOMATION")
+createToggle("WalkSpeed (33)", G.WalkSpeed, function(s) G.WalkSpeed = s end)
+createToggle("No Ragdoll", G.NoRagdoll, function(s) G.NoRagdoll = s end)
+createToggle("Auto Back Step", G.AutoBackStep, function(s) G.AutoBackStep = s end)
+createToggle("Performance Boost (FPS<10)", G.PerfBoost, function(s)
+    G.PerfBoost = s
+    if not s and PerfState.active then disablePerfBoost() end
+end)
+
+sectionHeader("SETTINGS")
+createSlider("WalkSpeed", 16, 100, Settings.WalkSpeed, function(v) Settings.WalkSpeed = v end, "")
+createSlider("BackStep Distance", 1, 5, Settings.BackStepDist, function(v) Settings.BackStepDist = v end, "m")
+createSlider("BackStep Range", 2, 10, Settings.BackStepRange, function(v) Settings.BackStepRange = v end, "m")
+createSlider("BackStep Cooldown", 1, 10, Settings.BackStepCooldown, function(v) Settings.BackStepCooldown = v end, "s")
+createSlider("Idle Threshold", 3, 30, Settings.IdleThreshold, function(v) Settings.IdleThreshold = v end, "s")
+
+sectionHeader("STATUS")
+local fpsText = Instance.new("TextLabel")
+fpsText.Size = UDim2.new(1, 0, 0, 32)
+fpsText.BackgroundColor3 = Settings.Card
+fpsText.Text = "60 FPS"
+fpsText.TextColor3 = Settings.Muted
+fpsText.Font = Enum.Font.GothamBold
+fpsText.TextSize = 12
+fpsText.Active = false
+fpsText.Parent = Scroll
+Instance.new("UICorner", fpsText).CornerRadius = UDim.new(0, 8)
+
+-- ==================== FPS + MAIN LOOP ====================
+local fps, frameCount, timeAccum = 60, 0, 0
+
+RunService.Heartbeat:Connect(function(dt)
+    frameCount = frameCount + 1
+    timeAccum = timeAccum + dt
+    if timeAccum >= 1 then
+        fps = math.floor(frameCount / timeAccum)
+        frameCount = 0
+        timeAccum = 0
+
+        -- FPS rengi
+        if fps >= 50 then
+            fpsText.TextColor3 = Settings.Muted
+        elseif fps >= 30 then
+            fpsText.TextColor3 = Settings.Amber
+        else
+            fpsText.TextColor3 = Color3.fromRGB(248, 113, 113)
+        end
+
+        local perfLabel = PerfState.active and " [PERF]" or ""
+        fpsText.Text = fps .. " FPS" .. perfLabel
+
+        -- Idle durumu
+        if Idle.active then
+            statusDot.BackgroundColor3 = Settings.Amber
+            statusLabel.Text = "IDLE"
+            statusLabel.TextColor3 = Settings.Amber
+        else
+            statusDot.BackgroundColor3 = Settings.Green
+            statusLabel.Text = "ACTIVE"
+            statusLabel.TextColor3 = Settings.Green
+        end
+
+        -- Otomatik perf boost
+        updatePerfBoost(fps)
+    end
+
+    updateIdle(dt)
+    enforceWalkSpeed()
+    pcall(tryNoRagdoll)
+    pcall(tryAutoBackStep)
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    Idle.timer = 0
+    backStepCooldownUntil = tick() + 2
+    if not Idle.active then
+        enforceWalkSpeed()
+        tryNoRagdoll()
+    end
+end)
+
+print("[NOVE v8] Loaded | PerfBoost: FPS<10")
